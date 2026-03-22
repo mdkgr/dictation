@@ -12,7 +12,10 @@ import io
 import sys
 import wave
 import time
+import tempfile
 import threading
+from pathlib import Path
+from datetime import datetime
 
 # Fix Windows console encoding
 if sys.platform == "win32":
@@ -50,12 +53,23 @@ MODEL = "gemini-2.5-flash"
 HOTKEY = "ctrl+shift+space"
 QUIT_KEY = "ctrl+shift+q"
 SAMPLE_RATE = 16000
+MAX_RETRIES = 3
+CHUNK_SECONDS = 55  # Split audio into chunks if longer than this
+BACKUP_DIR = Path(__file__).parent / "backups"
 
 PROMPT = (
     "Απομαγνητοφώνησε αυτή την ηχογράφηση στα ελληνικά. "
     "Διόρθωσε ορθογραφία, τόνους και στίξη. "
     "Διατήρησε τον προφορικό τόνο. "
     "Επίστρεψε ΜΟΝΟ το κείμενο, τίποτα άλλο."
+)
+
+PROMPT_CHUNK = (
+    "Απομαγνητοφώνησε αυτό το κομμάτι ηχογράφησης στα ελληνικά. "
+    "Διόρθωσε ορθογραφία, τόνους και στίξη. "
+    "Διατήρησε τον προφορικό τόνο. "
+    "Επίστρεψε ΜΟΝΟ το κείμενο, τίποτα άλλο. "
+    "Αυτό είναι κομμάτι {n} από {total}."
 )
 
 
@@ -108,6 +122,53 @@ class Dictation:
         self.processing = True
         threading.Thread(target=self._transcribe, daemon=True).start()
 
+    # ── Audio helpers ────────────────────────────────────────────────
+    @staticmethod
+    def _audio_to_wav(audio_data: np.ndarray) -> bytes:
+        """Convert int16 numpy array to WAV bytes."""
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio_data.tobytes())
+        return buf.getvalue()
+
+    def _save_backup(self, wav_bytes: bytes) -> Path:
+        """Save WAV to backup dir, return path."""
+        BACKUP_DIR.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = BACKUP_DIR / f"dictation_{ts}.wav"
+        path.write_bytes(wav_bytes)
+        return path
+
+    def _call_gemini(self, wav_bytes: bytes, prompt: str) -> str:
+        """Call Gemini with retries. Returns text or empty string."""
+        audio_part = types.Part.from_bytes(
+            data=wav_bytes, mime_type="audio/wav"
+        )
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = self.client.models.generate_content(
+                    model=MODEL,
+                    contents=[prompt, audio_part],
+                )
+                text = (response.text or "").strip()
+                if text:
+                    return text
+                if attempt < MAX_RETRIES:
+                    wait = 2 ** attempt
+                    print(f"  ⏳ Κενή απάντηση, retry {attempt}/{MAX_RETRIES} σε {wait}s...")
+                    time.sleep(wait)
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    wait = 2 ** attempt
+                    print(f"  ⚠  Σφάλμα ({e}), retry {attempt}/{MAX_RETRIES} σε {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+        return ""
+
     # ── Transcribe & paste ────────────────────────────────────────────
     def _transcribe(self):
         try:
@@ -116,27 +177,42 @@ class Dictation:
                 beep(200, 300)
                 return
 
-            # Build WAV in memory
             audio = np.concatenate(self.frames)
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(SAMPLE_RATE)
-                wf.writeframes(audio.tobytes())
+            duration_s = len(audio) / SAMPLE_RATE
+            print(f"  📏 Διάρκεια: {duration_s:.1f}s")
 
-            audio_part = types.Part.from_bytes(
-                data=buf.getvalue(), mime_type="audio/wav"
-            )
+            full_wav = self._audio_to_wav(audio)
+            text = ""
 
-            response = self.client.models.generate_content(
-                model=MODEL,
-                contents=[PROMPT, audio_part],
-            )
+            if duration_s <= CHUNK_SECONDS:
+                # Single call with retries
+                text = self._call_gemini(full_wav, PROMPT)
+            else:
+                # Split into chunks
+                chunk_samples = CHUNK_SECONDS * SAMPLE_RATE
+                chunks = [audio[i:i + chunk_samples]
+                          for i in range(0, len(audio), chunk_samples)]
+                total = len(chunks)
+                print(f"  ✂  Μεγάλη ηχογράφηση — {total} κομμάτια")
 
-            text = response.text.strip()
-            if not text:
-                print("  ⚠  Κενή απάντηση από Gemini")
+                parts = []
+                for idx, chunk in enumerate(chunks, 1):
+                    print(f"  📤 Κομμάτι {idx}/{total}...")
+                    chunk_wav = self._audio_to_wav(chunk)
+                    prompt = PROMPT_CHUNK.format(n=idx, total=total)
+                    result = self._call_gemini(chunk_wav, prompt)
+                    if result:
+                        parts.append(result)
+                    else:
+                        print(f"  ⚠  Κομμάτι {idx} κενό μετά από {MAX_RETRIES} retries")
+
+                text = " ".join(parts)
+
+            if not text.strip():
+                # All retries failed — save backup
+                backup_path = self._save_backup(full_wav)
+                print(f"  ❌ Κενή απάντηση μετά από retries")
+                print(f"  💾 Backup: {backup_path}")
                 beep(200, 300)
                 return
 
@@ -152,16 +228,23 @@ class Dictation:
             time.sleep(0.05)
             keyboard.send("ctrl+v")
 
-            # Restore previous clipboard after paste completes
             time.sleep(0.3)
             try:
                 pyperclip.copy(old_clip)
             except Exception:
                 pass
 
-            beep(800, 80)  # success
+            beep(800, 80)
 
         except Exception as e:
+            # Save backup on unexpected errors too
+            try:
+                if self.frames:
+                    audio = np.concatenate(self.frames)
+                    backup_path = self._save_backup(self._audio_to_wav(audio))
+                    print(f"  💾 Backup: {backup_path}")
+            except Exception:
+                pass
             print(f"  ❌ Σφάλμα: {e}")
             beep(200, 500)
         finally:
@@ -181,8 +264,8 @@ def main():
         sys.exit(1)
 
     d = Dictation()
-    keyboard.add_hotkey(HOTKEY, d.toggle, suppress=True)
-    keyboard.add_hotkey(QUIT_KEY, lambda: os._exit(0), suppress=True)
+    keyboard.add_hotkey(HOTKEY, d.toggle)
+    keyboard.add_hotkey(QUIT_KEY, lambda: os._exit(0))
 
     print()
     print("╔══════════════════════════════════════════╗")
