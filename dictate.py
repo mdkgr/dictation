@@ -54,7 +54,8 @@ HOTKEY = "ctrl+shift+space"
 QUIT_KEY = "ctrl+shift+q"
 SAMPLE_RATE = 16000
 MAX_RETRIES = 3
-CHUNK_SECONDS = 55  # Split audio into chunks if longer than this
+INLINE_MAX_SECONDS = 20   # Use inline bytes up to this duration
+CHUNK_SECONDS = 30         # Fallback chunk size if File API also fails
 BACKUP_DIR = Path(__file__).parent / "backups"
 
 PROMPT = (
@@ -142,16 +143,42 @@ class Dictation:
         path.write_bytes(wav_bytes)
         return path
 
-    def _call_gemini(self, wav_bytes: bytes, prompt: str) -> str:
-        """Call Gemini with retries. Returns text or empty string."""
+    def _call_gemini_inline(self, wav_bytes: bytes, prompt: str) -> str:
+        """Call Gemini with inline bytes + retries. Good for short audio."""
         audio_part = types.Part.from_bytes(
             data=wav_bytes, mime_type="audio/wav"
         )
+        return self._call_with_retries(prompt, audio_part)
+
+    def _call_gemini_file_api(self, wav_bytes: bytes, prompt: str) -> str:
+        """Upload via File API then call Gemini. Better for longer audio."""
+        # Write to temp file for upload
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        try:
+            tmp.write(wav_bytes)
+            tmp.close()
+            print("  📤 Upload μέσω File API...")
+            uploaded = self.client.files.upload(file=tmp.name)
+            result = self._call_with_retries(prompt, uploaded)
+            # Clean up remote file
+            try:
+                self.client.files.delete(name=uploaded.name)
+            except Exception:
+                pass
+            return result
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+
+    def _call_with_retries(self, prompt: str, audio_content) -> str:
+        """Call generate_content with retries. audio_content is Part or File."""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 response = self.client.models.generate_content(
                     model=MODEL,
-                    contents=[prompt, audio_part],
+                    contents=[prompt, audio_content],
                 )
                 text = (response.text or "").strip()
                 if text:
@@ -184,29 +211,37 @@ class Dictation:
             full_wav = self._audio_to_wav(audio)
             text = ""
 
-            if duration_s <= CHUNK_SECONDS:
-                # Single call with retries
-                text = self._call_gemini(full_wav, PROMPT)
+            if duration_s <= INLINE_MAX_SECONDS:
+                # Short audio — inline bytes
+                text = self._call_gemini_inline(full_wav, PROMPT)
             else:
-                # Split into chunks
-                chunk_samples = CHUNK_SECONDS * SAMPLE_RATE
-                chunks = [audio[i:i + chunk_samples]
-                          for i in range(0, len(audio), chunk_samples)]
-                total = len(chunks)
-                print(f"  ✂  Μεγάλη ηχογράφηση — {total} κομμάτια")
+                # Longer audio — try File API first (much more reliable)
+                print(f"  📁 Χρήση File API (audio > {INLINE_MAX_SECONDS}s)...")
+                try:
+                    text = self._call_gemini_file_api(full_wav, PROMPT)
+                except Exception as e:
+                    print(f"  ⚠  File API απέτυχε ({e}), fallback σε chunking...")
 
-                parts = []
-                for idx, chunk in enumerate(chunks, 1):
-                    print(f"  📤 Κομμάτι {idx}/{total}...")
-                    chunk_wav = self._audio_to_wav(chunk)
-                    prompt = PROMPT_CHUNK.format(n=idx, total=total)
-                    result = self._call_gemini(chunk_wav, prompt)
-                    if result:
-                        parts.append(result)
-                    else:
-                        print(f"  ⚠  Κομμάτι {idx} κενό μετά από {MAX_RETRIES} retries")
+                # Fallback: chunking
+                if not text:
+                    chunk_samples = CHUNK_SECONDS * SAMPLE_RATE
+                    chunks = [audio[i:i + chunk_samples]
+                              for i in range(0, len(audio), chunk_samples)]
+                    total = len(chunks)
+                    print(f"  ✂  Chunking — {total} κομμάτια x {CHUNK_SECONDS}s")
 
-                text = " ".join(parts)
+                    parts = []
+                    for idx, chunk in enumerate(chunks, 1):
+                        print(f"  📤 Κομμάτι {idx}/{total}...")
+                        chunk_wav = self._audio_to_wav(chunk)
+                        prompt = PROMPT_CHUNK.format(n=idx, total=total)
+                        result = self._call_gemini_inline(chunk_wav, prompt)
+                        if result:
+                            parts.append(result)
+                        else:
+                            print(f"  ⚠  Κομμάτι {idx} κενό")
+
+                    text = " ".join(parts)
 
             if not text.strip():
                 # All retries failed — save backup
