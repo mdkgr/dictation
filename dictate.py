@@ -4,7 +4,7 @@ Greek Dictation — Μίλα και γράψε στον δρομέα
 Ctrl+Shift+Space : εναλλαγή εγγραφής / μεταγραφής
 Ctrl+Shift+Q     : έξοδος
 
-Pipeline: Groq Whisper-large-v3-turbo (transcribe, no LLM polish).
+Pipeline: Groq Whisper-large-v3-turbo (transcribe) -> Gemini 2.5 Flash-Lite (polish).
 """
 
 import os
@@ -26,6 +26,7 @@ import numpy as np
 import sounddevice as sd
 import pyperclip
 import keyboard
+from google import genai
 from groq import Groq
 
 # Separate output stream for beeps (avoids conflict with recording input stream)
@@ -53,7 +54,9 @@ def set_console_title(title):
 
 # ── Config ────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_MODEL = "whisper-large-v3-turbo"
+POLISH_MODEL = "gemini-2.5-flash-lite"
 HOTKEY = "ctrl+shift+space"
 HOTKEY_NOSPACE = "ctrl+alt+space"
 QUIT_KEY = "ctrl+shift+q"
@@ -64,6 +67,14 @@ BACKUP_DIR = Path(__file__).parent / "backups"
 GROQ_BIAS = (
     "Αυτή είναι μια ελληνική υπαγόρευση. "
     "Τόνοι, στίξη, ορθογραφία: σωστά. Μία παράγραφος."
+)
+
+POLISH_PROMPT = (
+    "Παρακάτω ακολουθεί ελληνικό κείμενο από αυτόματη μεταγραφή ομιλίας. "
+    "Διόρθωσε ΜΟΝΟ ορθογραφία, τόνους και στίξη. "
+    "ΜΗΝ προσθέτεις ή αφαιρείς λέξεις, μην αλλάζεις το νόημα. "
+    "Επίστρεψε ΜΟΝΟ το διορθωμένο κείμενο, τίποτα άλλο.\n\n"
+    "Κείμενο:\n{text}"
 )
 
 
@@ -114,6 +125,7 @@ class Dictation:
         self.strip_leading_space = False
         self._indicator = RecordingIndicator()
         self.groq = Groq(api_key=GROQ_API_KEY)
+        self.gemini = genai.Client(api_key=GEMINI_API_KEY)
 
     # ── Toggle ────────────────────────────────────────────────────────
     def toggle(self, strip_leading=False):
@@ -209,6 +221,19 @@ class Dictation:
                     raise
         return ""
 
+    def _polish(self, raw_text: str) -> str:
+        """Proofread with Gemini 2.5 Flash-Lite. Returns raw_text on failure."""
+        try:
+            resp = self.gemini.models.generate_content(
+                model=POLISH_MODEL,
+                contents=[POLISH_PROMPT.format(text=raw_text)],
+            )
+            polished = (resp.text or "").strip()
+            return polished or raw_text
+        except Exception as e:
+            print(f"  ⚠  Polish απέτυχε ({e}), χρήση raw Groq output")
+            return raw_text
+
     # ── Transcribe & paste ────────────────────────────────────────────
     def _transcribe(self):
         try:
@@ -223,13 +248,15 @@ class Dictation:
 
             full_wav = self._audio_to_wav(audio)
 
-            text = self._groq_transcribe(full_wav)
-            if not text:
+            raw_text = self._groq_transcribe(full_wav)
+            if not raw_text:
                 backup_path = self._save_backup(full_wav)
                 print("  ❌ Groq απέτυχε μετά από retries")
                 print(f"  💾 Backup: {backup_path}")
                 beep(200, 300)
                 return
+
+            text = self._polish(raw_text)
 
             # Αφαίρεση newlines — μία παράγραφος
             text = " ".join(text.splitlines())
@@ -281,11 +308,18 @@ class Dictation:
 
 # ── Main ──────────────────────────────────────────────────────────────────
 def main():
+    missing = []
     if not GROQ_API_KEY:
-        print("❌ Δεν βρέθηκε GROQ_API_KEY!")
+        missing.append("GROQ_API_KEY")
+    if not GEMINI_API_KEY:
+        missing.append("GEMINI_API_KEY")
+    if missing:
+        for key in missing:
+            print(f"❌ Δεν βρέθηκε {key}!")
         print()
-        print("Ρύθμισε το ως environment variable:")
-        print('  setx GROQ_API_KEY "your-key-here"')
+        print("Ρύθμισε τα ως environment variables:")
+        for key in missing:
+            print(f'  setx {key} "your-key-here"')
         sys.exit(1)
 
     d = Dictation()
@@ -319,7 +353,7 @@ def main():
     print(f"║  {HOTKEY:20s}  εγγραφή/στοπ           ║")
     print(f"║  {HOTKEY_NOSPACE:20s}  εγγραφή (χωρίς space) ║")
     print(f"║  {QUIT_KEY:20s}  έξοδος                 ║")
-    print("║  Groq whisper-v3-turbo (no polish)            ║")
+    print("║  Groq whisper-v3-turbo + Gemini polish        ║")
     print("╚════════════════════════════════════════════════╝")
     print()
 
