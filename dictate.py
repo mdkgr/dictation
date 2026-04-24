@@ -4,7 +4,7 @@ Greek Dictation — Μίλα και γράψε στον δρομέα
 Ctrl+Shift+Space : εναλλαγή εγγραφής / μεταγραφής
 Ctrl+Shift+Q     : έξοδος
 
-Pipeline: Groq Whisper-large-v3-turbo (transcribe) -> Groq Llama 3.3 70B (polish).
+Pipeline: Groq Whisper-large-v3-turbo (transcribe, no LLM polish).
 """
 
 import os
@@ -54,7 +54,6 @@ def set_console_title(title):
 # ── Config ────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = "whisper-large-v3-turbo"
-POLISH_MODEL = "llama-3.3-70b-versatile"
 HOTKEY = "ctrl+shift+space"
 HOTKEY_NOSPACE = "ctrl+alt+space"
 QUIT_KEY = "ctrl+shift+q"
@@ -65,14 +64,6 @@ BACKUP_DIR = Path(__file__).parent / "backups"
 GROQ_BIAS = (
     "Αυτή είναι μια ελληνική υπαγόρευση. "
     "Τόνοι, στίξη, ορθογραφία: σωστά. Μία παράγραφος."
-)
-
-POLISH_PROMPT = (
-    "Παρακάτω ακολουθεί ελληνικό κείμενο από αυτόματη μεταγραφή ομιλίας. "
-    "Διόρθωσε ΜΟΝΟ ορθογραφία, τόνους και στίξη. "
-    "ΜΗΝ προσθέτεις ή αφαιρείς λέξεις, μην αλλάζεις το νόημα. "
-    "Επίστρεψε ΜΟΝΟ το διορθωμένο κείμενο, τίποτα άλλο.\n\n"
-    "Κείμενο:\n{text}"
 )
 
 
@@ -218,20 +209,6 @@ class Dictation:
                     raise
         return ""
 
-    def _polish(self, raw_text: str) -> str:
-        """Proofread with Groq Llama 3.3 70B. Returns raw_text on failure."""
-        try:
-            resp = self.groq.chat.completions.create(
-                model=POLISH_MODEL,
-                messages=[{"role": "user", "content": POLISH_PROMPT.format(text=raw_text)}],
-                temperature=0.0,
-            )
-            polished = (resp.choices[0].message.content or "").strip()
-            return polished or raw_text
-        except Exception as e:
-            print(f"  ⚠  Polish απέτυχε ({e}), χρήση raw Groq output")
-            return raw_text
-
     # ── Transcribe & paste ────────────────────────────────────────────
     def _transcribe(self):
         try:
@@ -246,15 +223,13 @@ class Dictation:
 
             full_wav = self._audio_to_wav(audio)
 
-            raw_text = self._groq_transcribe(full_wav)
-            if not raw_text:
+            text = self._groq_transcribe(full_wav)
+            if not text:
                 backup_path = self._save_backup(full_wav)
                 print("  ❌ Groq απέτυχε μετά από retries")
                 print(f"  💾 Backup: {backup_path}")
                 beep(200, 300)
                 return
-
-            text = self._polish(raw_text)
 
             # Αφαίρεση newlines — μία παράγραφος
             text = " ".join(text.splitlines())
@@ -344,7 +319,7 @@ def main():
     print(f"║  {HOTKEY:20s}  εγγραφή/στοπ           ║")
     print(f"║  {HOTKEY_NOSPACE:20s}  εγγραφή (χωρίς space) ║")
     print(f"║  {QUIT_KEY:20s}  έξοδος                 ║")
-    print("║  Groq whisper-v3-turbo + Llama polish         ║")
+    print("║  Groq whisper-v3-turbo (no polish)            ║")
     print("╚════════════════════════════════════════════════╝")
     print()
 
