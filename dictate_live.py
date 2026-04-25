@@ -215,7 +215,16 @@ class Dictation:
                 audio_queue.put_nowait(None)
                 await sender
 
+                # Signal end of audio so server flushes cached audio,
+                # finalizes transcription, and emits turn_complete.
+                # Without this, receiver would hang waiting for more audio.
+                try:
+                    await session.send_realtime_input(audio_stream_end=True)
+                except Exception as e:
+                    print(f"\n  ⚠  audio_stream_end error: {e}")
+
                 # Drain receiver up to N seconds for trailing transcripts
+                # (it returns when turn_complete arrives)
                 try:
                     await asyncio.wait_for(receiver, timeout=RECEIVER_DRAIN_TIMEOUT)
                 except asyncio.TimeoutError:
@@ -275,26 +284,28 @@ class Dictation:
             content = getattr(msg, "server_content", None)
             if not content:
                 continue
+
             transcript = getattr(content, "input_transcription", None)
-            if not transcript:
-                continue
-            text = getattr(transcript, "text", None)
-            if not text:
-                continue
+            if transcript:
+                text = getattr(transcript, "text", None)
+                if text:
+                    text = text.replace("\n", " ").replace("\r", "")
+                    if self._first_chunk:
+                        if self.strip_leading_space:
+                            text = text.lstrip()
+                        if text:
+                            self._first_chunk = False
+                            self._collected.append(text)
+                            print(text, end="", flush=True)
+                            await loop.run_in_executor(None, self._paste_chunk, text)
+                    else:
+                        self._collected.append(text)
+                        print(text, end="", flush=True)
+                        await loop.run_in_executor(None, self._paste_chunk, text)
 
-            text = text.replace("\n", " ").replace("\r", "")
-
-            if self._first_chunk:
-                if self.strip_leading_space:
-                    text = text.lstrip()
-                if not text:
-                    continue
-                self._first_chunk = False
-
-            self._collected.append(text)
-            print(text, end="", flush=True)
-
-            await loop.run_in_executor(None, self._paste_chunk, text)
+            # Server signals end of turn → exit receiver
+            if getattr(content, "turn_complete", False):
+                return
 
     @staticmethod
     def _paste_chunk(text):
