@@ -51,6 +51,25 @@ def set_console_title(title):
         ctypes.windll.kernel32.SetConsoleTitleW(title)
 
 
+if sys.platform == "win32":
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _VK_CONTROL = 0x11
+    _VK_V = 0x56
+    _KEYEVENTF_KEYUP = 0x0002
+
+    def send_ctrl_v():
+        """Inject Ctrl+V via Win32 directly. Bypassing keyboard.send avoids
+        degrading the keyboard library's own low-level hook (which is what
+        listens for Ctrl+Shift+Space) under heavy paste volume."""
+        _user32.keybd_event(_VK_CONTROL, 0, 0, 0)
+        _user32.keybd_event(_VK_V, 0, 0, 0)
+        _user32.keybd_event(_VK_V, 0, _KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
+else:
+    def send_ctrl_v():
+        keyboard.send("ctrl+v")
+
+
 # ── Config ────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Override via env if model id changes (preview names rotate)
@@ -67,17 +86,15 @@ STOP_POLL_INTERVAL = 0.05      # how often async loop checks self.recording
 # gemini-3.1-flash-live-preview (python-genai issue #2238). Use ["AUDIO"] and
 # ignore the audio response — input_transcription is what we actually consume.
 #
-# silence_duration_ms=30000: default server VAD fires turn_complete after ~1s
-# of silence, which ended the receiver mid-recording when the user paused to
-# think. Cannot fully disable VAD (it requires manual activity_start signals
-# we don't send → server stops transcribing). 30s threshold tolerates any
-# realistic thinking pause; audio_stream_end=True on stop still flushes
-# immediately regardless of this value.
+# Server VAD fires turn_complete on short silence (~1s) and won't be tamed by
+# silence_duration_ms on this preview model — so disable it entirely and drive
+# turn boundaries manually via activity_start/activity_end + audio_stream_end.
+# This keeps a single turn open for the whole recording, regardless of pauses.
 LIVE_CONFIG = {
     "response_modalities": ["AUDIO"],
     "input_audio_transcription": {},
     "realtime_input_config": {
-        "automatic_activity_detection": {"silence_duration_ms": 30000},
+        "automatic_activity_detection": {"disabled": True},
     },
 }
 
@@ -215,6 +232,13 @@ class Dictation:
             async with self.client.aio.live.connect(
                 model=MODEL, config=LIVE_CONFIG
             ) as session:
+                # VAD is disabled in config — manually open the activity
+                # window so the server starts transcribing audio.
+                try:
+                    await session.send_realtime_input(activity_start=types.ActivityStart())
+                except Exception as e:
+                    print(f"\n  ⚠  activity_start error: {e}")
+
                 sender = asyncio.create_task(self._audio_sender(session, audio_queue))
                 receiver = asyncio.create_task(self._transcript_receiver(session))
 
@@ -226,9 +250,13 @@ class Dictation:
                 audio_queue.put_nowait(None)
                 await sender
 
-                # Signal end of audio so server flushes cached audio,
-                # finalizes transcription, and emits turn_complete.
-                # Without this, receiver would hang waiting for more audio.
+                # Close the activity, then close the audio stream. The server
+                # finalizes transcription and emits turn_complete; without
+                # these the receiver would hang waiting for more audio.
+                try:
+                    await session.send_realtime_input(activity_end=types.ActivityEnd())
+                except Exception as e:
+                    print(f"\n  ⚠  activity_end error: {e}")
                 try:
                     await session.send_realtime_input(audio_stream_end=True)
                 except Exception as e:
@@ -333,7 +361,7 @@ class Dictation:
     def _paste_chunk(text):
         pyperclip.copy(text)
         time.sleep(0.02)
-        keyboard.send("ctrl+v")
+        send_ctrl_v()
         time.sleep(0.04)
 
 
