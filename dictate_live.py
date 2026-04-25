@@ -53,21 +53,32 @@ def set_console_title(title):
 
 if sys.platform == "win32":
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _user32.GetAsyncKeyState.restype = ctypes.c_short
     _VK_CONTROL = 0x11
+    _VK_SHIFT = 0x10
+    _VK_MENU = 0x12  # Alt
+    _VK_SPACE = 0x20
+    _VK_Q = 0x51
     _VK_V = 0x56
     _KEYEVENTF_KEYUP = 0x0002
 
     def send_ctrl_v():
-        """Inject Ctrl+V via Win32 directly. Bypassing keyboard.send avoids
-        degrading the keyboard library's own low-level hook (which is what
-        listens for Ctrl+Shift+Space) under heavy paste volume."""
+        """Inject Ctrl+V via Win32 directly. Bypassing keyboard.send keeps
+        synthesized input out of the polling path and avoids any interaction
+        with the keyboard library."""
         _user32.keybd_event(_VK_CONTROL, 0, 0, 0)
         _user32.keybd_event(_VK_V, 0, 0, 0)
         _user32.keybd_event(_VK_V, 0, _KEYEVENTF_KEYUP, 0)
         _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
+
+    def _is_down(vk):
+        return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
 else:
     def send_ctrl_v():
         keyboard.send("ctrl+v")
+
+    def _is_down(vk):  # pragma: no cover — Windows-only path
+        return False
 
 
 # ── Config ────────────────────────────────────────────────────────────────
@@ -155,14 +166,13 @@ class AsyncBridge:
 
 
 class Dictation:
-    def __init__(self, refresh_hotkeys=None):
+    def __init__(self):
         self.recording = False
         self.processing = False
         self.strip_leading_space = False
         self._first_chunk = True
         self._old_clip = ""
         self._collected = []
-        self._refresh_hotkeys = refresh_hotkeys
 
         self._indicator = RecordingIndicator()
         self.bridge = AsyncBridge()
@@ -301,15 +311,6 @@ class Dictation:
             set_console_title("Greek Dictation Live")
             self.processing = False
 
-            # Heavy keyboard.send("ctrl+v") usage during paste degrades the
-            # keyboard library's low-level hook on Windows, so the next
-            # Ctrl+Shift+Space stops firing. Refresh hooks before idle.
-            if self._refresh_hotkeys is not None:
-                try:
-                    self._refresh_hotkeys()
-                except Exception as e:
-                    print(f"  ⚠  hotkey refresh error: {e}")
-
     async def _audio_sender(self, session, audio_queue: asyncio.Queue):
         while True:
             pcm = await audio_queue.get()
@@ -374,29 +375,41 @@ def main():
         print('  setx GEMINI_API_KEY "your-key-here"')
         sys.exit(1)
 
-    def register_hotkeys():
-        keyboard.add_hotkey(HOTKEY, d.toggle)
-        keyboard.add_hotkey(HOTKEY_NOSPACE, lambda: d.toggle(strip_leading=True))
-        keyboard.add_hotkey(QUIT_KEY, lambda: os._exit(0))
+    d = Dictation()
 
-    def refresh_hotkeys():
-        keyboard.unhook_all()
-        register_hotkeys()
-
-    d = Dictation(refresh_hotkeys=refresh_hotkeys)
-    register_hotkeys()
-
-    def hotkey_watchdog():
+    # Hotkey detection via GetAsyncKeyState polling. The keyboard library's
+    # low-level hook on Windows degrades after extended use (silently misses
+    # presses). Polling Win32 directly is rock-solid: no hook, no state to
+    # corrupt, no refresh dance.
+    def hotkey_poll_loop():
+        last_main = last_nospace = last_quit = False
         while True:
-            time.sleep(30)
-            if not d.recording and not d.processing:
-                try:
-                    keyboard.unhook_all()
-                    register_hotkeys()
-                except Exception:
-                    pass
+            try:
+                ctrl = _is_down(_VK_CONTROL)
+                shift = _is_down(_VK_SHIFT)
+                alt = _is_down(_VK_MENU)
+                space = _is_down(_VK_SPACE)
+                q_key = _is_down(_VK_Q)
 
-    threading.Thread(target=hotkey_watchdog, daemon=True).start()
+                main = ctrl and shift and space and not alt
+                nospace = ctrl and alt and space and not shift
+                quit_combo = ctrl and shift and q_key
+
+                if main and not last_main:
+                    d.toggle()
+                if nospace and not last_nospace:
+                    d.toggle(strip_leading=True)
+                if quit_combo and not last_quit:
+                    os._exit(0)
+
+                last_main = main
+                last_nospace = nospace
+                last_quit = quit_combo
+            except Exception:
+                pass
+            time.sleep(0.04)
+
+    threading.Thread(target=hotkey_poll_loop, daemon=True).start()
 
     set_console_title("Greek Dictation Live")
     print()
@@ -411,7 +424,7 @@ def main():
     print()
 
     try:
-        keyboard.wait()
+        threading.Event().wait()
     except KeyboardInterrupt:
         print("\n👋 Τέλος!")
 
