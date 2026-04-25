@@ -138,13 +138,14 @@ class AsyncBridge:
 
 
 class Dictation:
-    def __init__(self):
+    def __init__(self, refresh_hotkeys=None):
         self.recording = False
         self.processing = False
         self.strip_leading_space = False
         self._first_chunk = True
         self._old_clip = ""
         self._collected = []
+        self._refresh_hotkeys = refresh_hotkeys
 
         self._indicator = RecordingIndicator()
         self.bridge = AsyncBridge()
@@ -272,6 +273,15 @@ class Dictation:
             set_console_title("Greek Dictation Live")
             self.processing = False
 
+            # Heavy keyboard.send("ctrl+v") usage during paste degrades the
+            # keyboard library's low-level hook on Windows, so the next
+            # Ctrl+Shift+Space stops firing. Refresh hooks before idle.
+            if self._refresh_hotkeys is not None:
+                try:
+                    self._refresh_hotkeys()
+                except Exception as e:
+                    print(f"  ⚠  hotkey refresh error: {e}")
+
     async def _audio_sender(self, session, audio_queue: asyncio.Queue):
         while True:
             pcm = await audio_queue.get()
@@ -336,13 +346,16 @@ def main():
         print('  setx GEMINI_API_KEY "your-key-here"')
         sys.exit(1)
 
-    d = Dictation()
-
     def register_hotkeys():
         keyboard.add_hotkey(HOTKEY, d.toggle)
         keyboard.add_hotkey(HOTKEY_NOSPACE, lambda: d.toggle(strip_leading=True))
         keyboard.add_hotkey(QUIT_KEY, lambda: os._exit(0))
 
+    def refresh_hotkeys():
+        keyboard.unhook_all()
+        register_hotkeys()
+
+    d = Dictation(refresh_hotkeys=refresh_hotkeys)
     register_hotkeys()
 
     def hotkey_watchdog():
