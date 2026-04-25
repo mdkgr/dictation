@@ -142,17 +142,18 @@ class Dictation:
 
     # ── Hotkey entry ─────────────────────────────────────────────────
     def toggle(self, strip_leading=False):
+        # Recording → stop (always honored, even if cleanup is queued)
+        if self.recording:
+            self._stop()
+            return
+        # Cleanup phase after stop → block until async finalizes
         if self.processing:
             print("  ⏳ Επεξεργασία σε εξέλιξη, περίμενε...")
             return
-        if not self.recording:
-            self._start(strip_leading)
-        else:
-            self._stop()
+        self._start(strip_leading)
 
     def _start(self, strip_leading):
         self.recording = True
-        self.processing = True
         self.strip_leading_space = strip_leading
         self._first_chunk = True
         self._collected = []
@@ -171,6 +172,7 @@ class Dictation:
 
     def _stop(self):
         self.recording = False
+        self.processing = True  # gate re-start until async finalizes
         self._indicator.hide()
         beep(400, 120)
 
