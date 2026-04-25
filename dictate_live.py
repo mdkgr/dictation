@@ -67,15 +67,17 @@ STOP_POLL_INTERVAL = 0.05      # how often async loop checks self.recording
 # gemini-3.1-flash-live-preview (python-genai issue #2238). Use ["AUDIO"] and
 # ignore the audio response — input_transcription is what we actually consume.
 #
-# automatic_activity_detection.disabled=True: server VAD fires turn_complete on
-# silence (~1s), which ended the receiver mid-recording when the user paused to
-# think. Disabling it makes turn_complete fire only after we send
-# audio_stream_end=True on stop.
+# silence_duration_ms=30000: default server VAD fires turn_complete after ~1s
+# of silence, which ended the receiver mid-recording when the user paused to
+# think. Cannot fully disable VAD (it requires manual activity_start signals
+# we don't send → server stops transcribing). 30s threshold tolerates any
+# realistic thinking pause; audio_stream_end=True on stop still flushes
+# immediately regardless of this value.
 LIVE_CONFIG = {
     "response_modalities": ["AUDIO"],
     "input_audio_transcription": {},
     "realtime_input_config": {
-        "automatic_activity_detection": {"disabled": True},
+        "automatic_activity_detection": {"silence_duration_ms": 30000},
     },
 }
 
