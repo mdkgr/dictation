@@ -63,8 +63,11 @@ BLOCK_SIZE = 1600  # 100ms chunks @ 16kHz
 RECEIVER_DRAIN_TIMEOUT = 5.0  # seconds to wait for final transcripts after stop
 STOP_POLL_INTERVAL = 0.05      # how often async loop checks self.recording
 
+# NOTE: response_modalities=["TEXT"] triggers WebSocket 1011 internal error on
+# gemini-3.1-flash-live-preview (python-genai issue #2238). Use ["AUDIO"] and
+# ignore the audio response — input_transcription is what we actually consume.
 LIVE_CONFIG = {
-    "response_modalities": ["TEXT"],
+    "response_modalities": ["AUDIO"],
     "input_audio_transcription": {},
 }
 
