@@ -101,6 +101,17 @@ STOP_POLL_INTERVAL = 0.05      # how often async loop checks self.recording
 # silence_duration_ms on this preview model — so disable it entirely and drive
 # turn boundaries manually via activity_start/activity_end + audio_stream_end.
 # This keeps a single turn open for the whole recording, regardless of pauses.
+PROOFREAD_MODEL = "gemini-2.5-flash"
+
+PROOFREAD_PROMPT = (
+    "Είσαι ειδικός διορθωτής ελληνικών κειμένων. "
+    "Το παρακάτω κείμενο προήλθε από speech-to-text και μπορεί να έχει λάθη. "
+    "Διόρθωσε: ορθογραφία, τονισμό, στίξη, γραμματική, "
+    "ομόηχες λέξεις (π.χ. ει/οι/η/ι/υ, ο/ω, ε/αι). "
+    "Μη αλλάξεις νόημα ή ύφος. "
+    "Επίστρεψε ΜΟΝΟ το διορθωμένο κείμενο, τίποτα άλλο."
+)
+
 LIVE_CONFIG = {
     "response_modalities": ["AUDIO"],
     "input_audio_transcription": {},
@@ -170,13 +181,35 @@ class Dictation:
         self.recording = False
         self.processing = False
         self.strip_leading_space = False
-        self._first_chunk = True
-        self._old_clip = ""
         self._collected = []
 
         self._indicator = RecordingIndicator()
         self.bridge = AsyncBridge()
         self.client = genai.Client(api_key=GEMINI_API_KEY)
+
+    def _proofread(self, text):
+        """Proofread Greek text via second Gemini call."""
+        response = self.client.models.generate_content(
+            model=PROOFREAD_MODEL,
+            contents=[PROOFREAD_PROMPT + "\n\n" + text],
+        )
+        result = (response.text or "").replace("\n", " ").replace("\r", "").strip()
+        return result or text
+
+    def _paste_text(self, text):
+        """Paste text at cursor position, restore clipboard."""
+        try:
+            old_clip = pyperclip.paste()
+        except Exception:
+            old_clip = ""
+        pyperclip.copy(text)
+        time.sleep(0.02)
+        send_ctrl_v()
+        time.sleep(0.08)
+        try:
+            pyperclip.copy(old_clip)
+        except Exception:
+            pass
 
     # ── Hotkey entry ─────────────────────────────────────────────────
     def toggle(self, strip_leading=False):
@@ -193,17 +226,12 @@ class Dictation:
     def _start(self, strip_leading):
         self.recording = True
         self.strip_leading_space = strip_leading
-        self._first_chunk = True
         self._collected = []
-        try:
-            self._old_clip = pyperclip.paste()
-        except Exception:
-            self._old_clip = ""
 
         set_console_title("● REC — Greek Dictation Live")
         self._indicator.show()
         beep(600, 120)
-        print("  🎙  Εγγραφή... (μίλα — paste γίνεται live)")
+        print("  🎙  Εγγραφή... (μίλα — paste γίνεται μετά τη διόρθωση)")
         print("  ", end="", flush=True)
 
         self.bridge.schedule(self._run_session())
@@ -293,16 +321,19 @@ class Dictation:
                 except Exception:
                     pass
 
-            # Restore clipboard after last paste settles
-            try:
-                time.sleep(0.1)
-                pyperclip.copy(self._old_clip)
-            except Exception:
-                pass
-
             full_text = "".join(self._collected).strip()
             if full_text:
-                print(f"\n  ✅ {full_text}")
+                print(f"\n  📝 Raw: {full_text}")
+                print("  ⏳ Διόρθωση...")
+                try:
+                    final_text = self._proofread(full_text)
+                    if self.strip_leading_space:
+                        final_text = final_text.lstrip()
+                except Exception as e:
+                    print(f"  ⚠  Proofread failed ({e}), using raw")
+                    final_text = full_text
+                print(f"  ✅ {final_text}")
+                self._paste_text(final_text)
                 beep(800, 80)
             else:
                 print("\n  ⚠  Κενό transcript")
@@ -328,7 +359,6 @@ class Dictation:
                 break
 
     async def _transcript_receiver(self, session):
-        loop = asyncio.get_running_loop()
         async for msg in session.receive():
             content = getattr(msg, "server_content", None)
             if not content:
@@ -339,31 +369,11 @@ class Dictation:
                 text = getattr(transcript, "text", None)
                 if text:
                     text = text.replace("\n", " ").replace("\r", "")
-                    if self._first_chunk:
-                        if self.strip_leading_space:
-                            text = text.lstrip()
-                        if text:
-                            self._first_chunk = False
-                            self._collected.append(text)
-                            print(text, end="", flush=True)
-                            await loop.run_in_executor(None, self._paste_chunk, text)
-                    else:
-                        self._collected.append(text)
-                        print(text, end="", flush=True)
-                        await loop.run_in_executor(None, self._paste_chunk, text)
+                    self._collected.append(text)
+                    print(text, end="", flush=True)
 
-            # Exit only if user has stopped — guards against unexpected
-            # turn_complete (e.g. if VAD config is ignored by a future API
-            # version) so the receiver doesn't die mid-recording.
             if getattr(content, "turn_complete", False) and not self.recording:
                 return
-
-    @staticmethod
-    def _paste_chunk(text):
-        pyperclip.copy(text)
-        time.sleep(0.02)
-        send_ctrl_v()
-        time.sleep(0.04)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────

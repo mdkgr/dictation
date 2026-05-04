@@ -69,6 +69,15 @@ PROMPT = (
     "Επίστρεψε ΜΟΝΟ το κείμενο, τίποτα άλλο."
 )
 
+PROOFREAD_PROMPT = (
+    "Είσαι ειδικός διορθωτής ελληνικών κειμένων. "
+    "Το παρακάτω κείμενο προήλθε από speech-to-text και μπορεί να έχει λάθη. "
+    "Διόρθωσε: ορθογραφία, τονισμό, στίξη, γραμματική, "
+    "ομόηχες λέξεις (π.χ. ει/οι/η/ι/υ, ο/ω, ε/αι). "
+    "Μη αλλάξεις νόημα ή ύφος. "
+    "Επίστρεψε ΜΟΝΟ το διορθωμένο κείμενο, τίποτα άλλο."
+)
+
 
 class RecordingIndicator:
     """System tray icon that turns red while recording."""
@@ -184,64 +193,40 @@ class Dictation:
         path.write_bytes(wav_bytes)
         return path
 
-    def _stream_and_paste(self, audio_part):
-        """Stream Gemini response and paste chunks as they arrive.
+    def _get_transcription(self, audio_part):
+        """Get full transcription from Gemini (no pasting)."""
+        response = self.client.models.generate_content(
+            model=MODEL,
+            contents=[PROMPT, audio_part],
+        )
+        text = (response.text or "").replace("\n", " ").replace("\r", "").strip()
+        return text
 
-        Returns (text, pasted_anything, error).
-        Caller decides retry policy: safe to retry only if not pasted_anything.
-        """
-        full_text = []
-        pasted_anything = False
-        error = None
-        first_meaningful_chunk = True
+    def _proofread(self, text):
+        """Proofread Greek text via second Gemini call."""
+        response = self.client.models.generate_content(
+            model=MODEL,
+            contents=[PROOFREAD_PROMPT + "\n\n" + text],
+        )
+        result = (response.text or "").replace("\n", " ").replace("\r", "").strip()
+        return result or text
 
+    def _paste_text(self, text):
+        """Paste text at cursor position, restore clipboard."""
         try:
             old_clip = pyperclip.paste()
         except Exception:
             old_clip = ""
-
+        pyperclip.copy(text)
+        time.sleep(0.02)
+        keyboard.send("ctrl+v")
+        time.sleep(0.08)
         try:
-            stream = self.client.models.generate_content_stream(
-                model=MODEL,
-                contents=[PROMPT, audio_part],
-            )
-            for resp_chunk in stream:
-                text_chunk = resp_chunk.text or ""
-                if not text_chunk:
-                    continue
+            pyperclip.copy(old_clip)
+        except Exception:
+            pass
 
-                # One paragraph: collapse newlines to spaces
-                text_chunk = text_chunk.replace("\n", " ").replace("\r", "")
-
-                # Strip leading whitespace on first meaningful chunk if requested
-                if first_meaningful_chunk:
-                    if self.strip_leading_space:
-                        text_chunk = text_chunk.lstrip()
-                    if not text_chunk:
-                        continue
-                    first_meaningful_chunk = False
-
-                full_text.append(text_chunk)
-
-                pyperclip.copy(text_chunk)
-                time.sleep(0.02)
-                keyboard.send("ctrl+v")
-                time.sleep(0.04)
-                pasted_anything = True
-        except Exception as e:
-            error = e
-        finally:
-            # Wait for last paste to settle, then restore clipboard
-            if pasted_anything:
-                time.sleep(0.08)
-            try:
-                pyperclip.copy(old_clip)
-            except Exception:
-                pass
-
-        return "".join(full_text), pasted_anything, error
-
-    # ── Transcribe & paste ────────────────────────────────────────────
+    # ── Transcribe, proofread & paste ───────────────────────────────
     def _transcribe(self):
         try:
             if not self.frames:
@@ -258,36 +243,39 @@ class Dictation:
                 data=full_wav, mime_type="audio/wav"
             )
 
-            text = ""
+            # Step 1: Transcribe
+            raw_text = ""
             for attempt in range(1, MAX_RETRIES + 1):
-                text, pasted, error = self._stream_and_paste(audio_part)
+                try:
+                    raw_text = self._get_transcription(audio_part)
+                    if raw_text:
+                        break
+                except Exception as e:
+                    if attempt < MAX_RETRIES:
+                        wait = 2 ** attempt
+                        print(f"  ⚠  {e}, retry {attempt}/{MAX_RETRIES} σε {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        raise
 
-                if text and not error:
-                    break  # Success
-
-                if pasted:
-                    # Partial paste already on cursor — cannot retry without dup
-                    if error:
-                        print(f"  ⚠  Διακοπή stream μετά partial paste ({error})")
-                    break
-
-                # Nothing pasted yet — safe to retry
-                if attempt < MAX_RETRIES:
-                    wait = 2 ** attempt
-                    reason = error if error else "κενή απάντηση"
-                    print(f"  ⚠  {reason}, retry {attempt}/{MAX_RETRIES} σε {wait}s...")
-                    time.sleep(wait)
-                elif error:
-                    raise error
-
-            if not text or not text.strip():
+            if not raw_text:
                 backup_path = self._save_backup(full_wav)
                 print("  ❌ Κενή απάντηση μετά από retries")
                 print(f"  💾 Backup: {backup_path}")
                 beep(200, 300)
                 return
 
-            print(f"  ✅ {text}")
+            print(f"  📝 Raw: {raw_text}")
+
+            # Step 2: Proofread
+            print("  ⏳ Διόρθωση...")
+            final_text = self._proofread(raw_text)
+            if self.strip_leading_space:
+                final_text = final_text.lstrip()
+            print(f"  ✅ {final_text}")
+
+            # Step 3: Paste
+            self._paste_text(final_text)
             beep(800, 80)
 
         except Exception as e:
