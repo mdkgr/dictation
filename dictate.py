@@ -236,6 +236,7 @@ class Dictation:
             )
 
             text = ""
+            t0 = time.perf_counter()
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     text = self._transcribe_audio(audio_part)
@@ -248,6 +249,8 @@ class Dictation:
                         time.sleep(wait)
                     else:
                         raise
+            elapsed = time.perf_counter() - t0
+            print(f"  ⚡ API: {elapsed:.1f}s")
 
             if not text:
                 backup_path = self._save_backup(full_wav)
