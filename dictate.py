@@ -198,6 +198,9 @@ class Dictation:
         for chunk in self.client.models.generate_content_stream(
             model=MODEL,
             contents=[PROMPT, audio_part],
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         ):
             if chunk.text:
                 chunks.append(chunk.text)
