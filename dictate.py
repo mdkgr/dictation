@@ -64,18 +64,12 @@ BACKUP_DIR = Path(__file__).parent / "backups"
 
 PROMPT = (
     "Απομαγνητοφώνησε αυτή την ηχογράφηση στα ελληνικά. "
-    "Διόρθωσε ορθογραφία, τόνους και στίξη. "
-    "Διατήρησε τον προφορικό τόνο. "
-    "Επίστρεψε ΜΟΝΟ το κείμενο, τίποτα άλλο."
-)
-
-PROOFREAD_PROMPT = (
-    "Είσαι ειδικός διορθωτής ελληνικών κειμένων. "
-    "Το παρακάτω κείμενο προήλθε από speech-to-text και μπορεί να έχει λάθη. "
-    "Διόρθωσε: ορθογραφία, τονισμό, στίξη, γραμματική, "
-    "ομόηχες λέξεις (π.χ. ει/οι/η/ι/υ, ο/ω, ε/αι). "
-    "Μη αλλάξεις νόημα ή ύφος. "
-    "Επίστρεψε ΜΟΝΟ το διορθωμένο κείμενο, τίποτα άλλο."
+    "Πρέπει να είσαι 100% ακριβής. Ακολούθησε αυτά τα βήματα:\n"
+    "1. Μετέγραψε ακριβώς τι ακούς.\n"
+    "2. Διόρθωσε ορθογραφία, τονισμό και στίξη.\n"
+    "3. Πρόσεξε ιδιαίτερα ομόηχες λέξεις (ει/οι/η/ι/υ, ο/ω, ε/αι).\n"
+    "4. Διατήρησε τον προφορικό τόνο και το νόημα.\n"
+    "Επίστρεψε ΜΟΝΟ το τελικό διορθωμένο κείμενο, τίποτα άλλο."
 )
 
 
@@ -193,23 +187,13 @@ class Dictation:
         path.write_bytes(wav_bytes)
         return path
 
-    def _get_transcription(self, audio_part):
-        """Get full transcription from Gemini (no pasting)."""
+    def _transcribe_audio(self, audio_part):
+        """Transcribe + proofread in a single Gemini call."""
         response = self.client.models.generate_content(
             model=MODEL,
             contents=[PROMPT, audio_part],
         )
-        text = (response.text or "").replace("\n", " ").replace("\r", "").strip()
-        return text
-
-    def _proofread(self, text):
-        """Proofread Greek text via second Gemini call."""
-        response = self.client.models.generate_content(
-            model=MODEL,
-            contents=[PROOFREAD_PROMPT + "\n\n" + text],
-        )
-        result = (response.text or "").replace("\n", " ").replace("\r", "").strip()
-        return result or text
+        return (response.text or "").replace("\n", " ").replace("\r", "").strip()
 
     def _paste_text(self, text):
         """Paste text at cursor position, restore clipboard."""
@@ -243,12 +227,11 @@ class Dictation:
                 data=full_wav, mime_type="audio/wav"
             )
 
-            # Step 1: Transcribe
-            raw_text = ""
+            text = ""
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
-                    raw_text = self._get_transcription(audio_part)
-                    if raw_text:
+                    text = self._transcribe_audio(audio_part)
+                    if text:
                         break
                 except Exception as e:
                     if attempt < MAX_RETRIES:
@@ -258,24 +241,17 @@ class Dictation:
                     else:
                         raise
 
-            if not raw_text:
+            if not text:
                 backup_path = self._save_backup(full_wav)
                 print("  ❌ Κενή απάντηση μετά από retries")
                 print(f"  💾 Backup: {backup_path}")
                 beep(200, 300)
                 return
 
-            print(f"  📝 Raw: {raw_text}")
-
-            # Step 2: Proofread
-            print("  ⏳ Διόρθωση...")
-            final_text = self._proofread(raw_text)
             if self.strip_leading_space:
-                final_text = final_text.lstrip()
-            print(f"  ✅ {final_text}")
-
-            # Step 3: Paste
-            self._paste_text(final_text)
+                text = text.lstrip()
+            print(f"  ✅ {text}")
+            self._paste_text(text)
             beep(800, 80)
 
         except Exception as e:
