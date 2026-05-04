@@ -31,17 +31,22 @@ from google.genai import types
 
 # Separate output stream for beeps (avoids conflict with recording input stream)
 _beep_stream_lock = threading.Lock()
+_beep_cache = {}
 
 
 def beep(freq=600, duration_ms=120):
     """Play a tone through speakers without blocking."""
     def _play():
         try:
-            sr = 44100
-            t = np.linspace(0, duration_ms / 1000, int(sr * duration_ms / 1000), dtype=np.float32)
-            tone = (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+            key = (freq, duration_ms)
+            tone = _beep_cache.get(key)
+            if tone is None:
+                sr = 44100
+                t = np.linspace(0, duration_ms / 1000, int(sr * duration_ms / 1000), dtype=np.float32)
+                tone = (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+                _beep_cache[key] = tone
             with _beep_stream_lock:
-                sd.play(tone, samplerate=sr, blocking=True)
+                sd.play(tone, samplerate=44100, blocking=True)
         except Exception:
             pass
     threading.Thread(target=_play, daemon=True).start()
@@ -188,12 +193,15 @@ class Dictation:
         return path
 
     def _transcribe_audio(self, audio_part):
-        """Transcribe + proofread in a single Gemini call."""
-        response = self.client.models.generate_content(
+        """Transcribe + proofread in a single Gemini call (streaming)."""
+        chunks = []
+        for chunk in self.client.models.generate_content_stream(
             model=MODEL,
             contents=[PROMPT, audio_part],
-        )
-        return (response.text or "").replace("\n", " ").replace("\r", "").strip()
+        ):
+            if chunk.text:
+                chunks.append(chunk.text)
+        return "".join(chunks).replace("\n", " ").replace("\r", "").strip()
 
     def _paste_text(self, text):
         """Paste text at cursor position, restore clipboard."""
