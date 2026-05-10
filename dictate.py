@@ -38,6 +38,7 @@ if sys.platform == "win32":
     _VK_SPACE = 0x20
     _VK_Q = 0x51
     _VK_V = 0x56
+    _VK_BACK = 0x08
     _KEYEVENTF_KEYUP = 0x0002
 
     def _is_down(vk):
@@ -48,6 +49,12 @@ if sys.platform == "win32":
         _user32.keybd_event(_VK_V, 0, 0, 0)
         _user32.keybd_event(_VK_V, 0, _KEYEVENTF_KEYUP, 0)
         _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
+
+    def send_backspace():
+        _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(_VK_SHIFT, 0, _KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(_VK_BACK, 0, 0, 0)
+        _user32.keybd_event(_VK_BACK, 0, _KEYEVENTF_KEYUP, 0)
 else:
     import keyboard
 
@@ -56,6 +63,9 @@ else:
 
     def send_ctrl_v():
         keyboard.send("ctrl+v")
+
+    def send_backspace():
+        keyboard.send("backspace")
 
 # Separate output stream for beeps (avoids conflict with recording input stream)
 _beep_stream_lock = threading.Lock()
@@ -337,6 +347,7 @@ def main():
                 quit_combo = ctrl and shift and q_key
 
                 if main_combo and not last_main:
+                    send_backspace()
                     d.toggle()
                 if nospace_combo and not last_nospace:
                     d.toggle(strip_leading=True)
