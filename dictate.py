@@ -28,44 +28,31 @@ import pyperclip
 from google import genai
 from google.genai import types
 
-# Win32 polling for hotkeys — rock-solid, no hook degradation
+# Win32 RegisterHotKey — system-level, suppresses keypress so it never reaches focused app
 if sys.platform == "win32":
+    from ctypes import wintypes
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
-    _user32.GetAsyncKeyState.restype = ctypes.c_short
     _VK_CONTROL = 0x11
-    _VK_SHIFT = 0x10
-    _VK_MENU = 0x12  # Alt
     _VK_SPACE = 0x20
     _VK_Q = 0x51
     _VK_V = 0x56
-    _VK_BACK = 0x08
     _KEYEVENTF_KEYUP = 0x0002
-
-    def _is_down(vk):
-        return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+    _MOD_ALT = 0x0001
+    _MOD_CONTROL = 0x0002
+    _MOD_SHIFT = 0x0004
+    _MOD_NOREPEAT = 0x4000
+    _WM_HOTKEY = 0x0312
 
     def send_ctrl_v():
         _user32.keybd_event(_VK_CONTROL, 0, 0, 0)
         _user32.keybd_event(_VK_V, 0, 0, 0)
         _user32.keybd_event(_VK_V, 0, _KEYEVENTF_KEYUP, 0)
         _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
-
-    def send_backspace():
-        _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
-        _user32.keybd_event(_VK_SHIFT, 0, _KEYEVENTF_KEYUP, 0)
-        _user32.keybd_event(_VK_BACK, 0, 0, 0)
-        _user32.keybd_event(_VK_BACK, 0, _KEYEVENTF_KEYUP, 0)
 else:
     import keyboard
 
-    def _is_down(vk):
-        return False
-
     def send_ctrl_v():
         keyboard.send("ctrl+v")
-
-    def send_backspace():
-        keyboard.send("backspace")
 
 # Separate output stream for beeps (avoids conflict with recording input stream)
 _beep_stream_lock = threading.Lock()
@@ -332,36 +319,29 @@ def main():
 
     d = Dictation()
 
-    def hotkey_poll_loop():
-        last_main = last_nospace = last_quit = False
-        while True:
-            try:
-                ctrl = _is_down(_VK_CONTROL)
-                shift = _is_down(_VK_SHIFT)
-                alt = _is_down(_VK_MENU)
-                space = _is_down(_VK_SPACE)
-                q_key = _is_down(_VK_Q)
+    HOTKEY_ID_MAIN = 1
+    HOTKEY_ID_NOSPACE = 2
+    HOTKEY_ID_QUIT = 3
 
-                main_combo = ctrl and shift and space and not alt
-                nospace_combo = ctrl and alt and space and not shift
-                quit_combo = ctrl and shift and q_key
+    def hotkey_message_loop():
+        if not _user32.RegisterHotKey(None, HOTKEY_ID_MAIN, _MOD_CONTROL | _MOD_SHIFT | _MOD_NOREPEAT, _VK_SPACE):
+            print(f"  ⚠ Δεν καταχωρήθηκε {HOTKEY} (ίσως είναι δεσμευμένο)")
+        if not _user32.RegisterHotKey(None, HOTKEY_ID_NOSPACE, _MOD_CONTROL | _MOD_ALT | _MOD_NOREPEAT, _VK_SPACE):
+            print(f"  ⚠ Δεν καταχωρήθηκε {HOTKEY_NOSPACE} (ίσως είναι δεσμευμένο)")
+        if not _user32.RegisterHotKey(None, HOTKEY_ID_QUIT, _MOD_CONTROL | _MOD_SHIFT | _MOD_NOREPEAT, _VK_Q):
+            print(f"  ⚠ Δεν καταχωρήθηκε {QUIT_KEY} (ίσως είναι δεσμευμένο)")
 
-                if main_combo and not last_main:
-                    send_backspace()
+        msg = wintypes.MSG()
+        while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == _WM_HOTKEY:
+                if msg.wParam == HOTKEY_ID_MAIN:
                     d.toggle()
-                if nospace_combo and not last_nospace:
+                elif msg.wParam == HOTKEY_ID_NOSPACE:
                     d.toggle(strip_leading=True)
-                if quit_combo and not last_quit:
+                elif msg.wParam == HOTKEY_ID_QUIT:
                     os._exit(0)
 
-                last_main = main_combo
-                last_nospace = nospace_combo
-                last_quit = quit_combo
-            except Exception:
-                pass
-            time.sleep(0.04)
-
-    threading.Thread(target=hotkey_poll_loop, daemon=True).start()
+    threading.Thread(target=hotkey_message_loop, daemon=True).start()
 
     set_console_title("Greek Dictation")
     print()
