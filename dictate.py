@@ -25,9 +25,37 @@ if sys.platform == "win32":
 import numpy as np
 import sounddevice as sd
 import pyperclip
-import keyboard
 from google import genai
 from google.genai import types
+
+# Win32 polling for hotkeys — rock-solid, no hook degradation
+if sys.platform == "win32":
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _user32.GetAsyncKeyState.restype = ctypes.c_short
+    _VK_CONTROL = 0x11
+    _VK_SHIFT = 0x10
+    _VK_MENU = 0x12  # Alt
+    _VK_SPACE = 0x20
+    _VK_Q = 0x51
+    _VK_V = 0x56
+    _KEYEVENTF_KEYUP = 0x0002
+
+    def _is_down(vk):
+        return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+
+    def send_ctrl_v():
+        _user32.keybd_event(_VK_CONTROL, 0, 0, 0)
+        _user32.keybd_event(_VK_V, 0, 0, 0)
+        _user32.keybd_event(_VK_V, 0, _KEYEVENTF_KEYUP, 0)
+        _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
+else:
+    import keyboard
+
+    def _is_down(vk):
+        return False
+
+    def send_ctrl_v():
+        keyboard.send("ctrl+v")
 
 # Separate output stream for beeps (avoids conflict with recording input stream)
 _beep_stream_lock = threading.Lock()
@@ -214,7 +242,7 @@ class Dictation:
             old_clip = ""
         pyperclip.copy(text)
         time.sleep(0.02)
-        keyboard.send("ctrl+v")
+        send_ctrl_v()
         time.sleep(0.08)
         try:
             pyperclip.copy(old_clip)
@@ -294,26 +322,35 @@ def main():
 
     d = Dictation()
 
-    def register_hotkeys():
-        keyboard.add_hotkey(HOTKEY, d.toggle)
-        keyboard.add_hotkey(HOTKEY_NOSPACE, lambda: d.toggle(strip_leading=True))
-        keyboard.add_hotkey(QUIT_KEY, lambda: os._exit(0))
-
-    register_hotkeys()
-
-    # Watchdog: re-register hotkeys periodically to prevent Windows
-    # from silently dropping the low-level keyboard hook.
-    def hotkey_watchdog():
+    def hotkey_poll_loop():
+        last_main = last_nospace = last_quit = False
         while True:
-            time.sleep(30)
-            if not d.recording and not d.processing:
-                try:
-                    keyboard.unhook_all()
-                    register_hotkeys()
-                except Exception:
-                    pass
+            try:
+                ctrl = _is_down(_VK_CONTROL)
+                shift = _is_down(_VK_SHIFT)
+                alt = _is_down(_VK_MENU)
+                space = _is_down(_VK_SPACE)
+                q_key = _is_down(_VK_Q)
 
-    threading.Thread(target=hotkey_watchdog, daemon=True).start()
+                main_combo = ctrl and shift and space and not alt
+                nospace_combo = ctrl and alt and space and not shift
+                quit_combo = ctrl and shift and q_key
+
+                if main_combo and not last_main:
+                    d.toggle()
+                if nospace_combo and not last_nospace:
+                    d.toggle(strip_leading=True)
+                if quit_combo and not last_quit:
+                    os._exit(0)
+
+                last_main = main_combo
+                last_nospace = nospace_combo
+                last_quit = quit_combo
+            except Exception:
+                pass
+            time.sleep(0.04)
+
+    threading.Thread(target=hotkey_poll_loop, daemon=True).start()
 
     set_console_title("Greek Dictation")
     print()
@@ -328,7 +365,7 @@ def main():
     print()
 
     try:
-        keyboard.wait()
+        threading.Event().wait()
     except KeyboardInterrupt:
         print("\n👋 Τέλος!")
 
