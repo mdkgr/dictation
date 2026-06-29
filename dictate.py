@@ -4,7 +4,7 @@ Greek Dictation — Μίλα και γράψε στον δρομέα
 Ctrl+Shift+Space : εναλλαγή εγγραφής / μεταγραφής
 Ctrl+Shift+Q     : έξοδος
 
-Pipeline: Gemini 2.5 Flash (audio → text streaming, incremental paste).
+Pipeline: Gemini 2.5 Pro (audio → text streaming, incremental paste).
 """
 
 import os
@@ -84,7 +84,7 @@ def set_console_title(title):
 
 # ── Config ────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.5-pro"
 HOTKEY = "ctrl+shift+space"
 HOTKEY_NOSPACE = "ctrl+alt+space"
 QUIT_KEY = "ctrl+shift+q"
@@ -220,12 +220,11 @@ class Dictation:
     def _transcribe_audio(self, audio_part):
         """Transcribe + proofread in a single Gemini call (streaming)."""
         chunks = []
+        # 2.5 Pro always thinks (thinking_budget=0 is a no-op on Pro) — let it,
+        # accuracy over latency. This matches the proven greekspt config.
         for chunk in self.client.models.generate_content_stream(
             model=MODEL,
             contents=[PROMPT, audio_part],
-            config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
         ):
             if chunk.text:
                 chunks.append(chunk.text)
@@ -351,7 +350,7 @@ def main():
     print(f"║  {HOTKEY:20s}  εγγραφή/στοπ           ║")
     print(f"║  {HOTKEY_NOSPACE:20s}  εγγραφή (χωρίς space) ║")
     print(f"║  {QUIT_KEY:20s}  έξοδος                 ║")
-    print("║  Gemini 2.5 Flash (audio, streaming)          ║")
+    print("║  Gemini 2.5 Pro (audio, streaming)            ║")
     print("╚════════════════════════════════════════════════╝")
     print()
 
