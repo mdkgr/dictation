@@ -4,7 +4,7 @@ Greek Dictation — Μίλα και γράψε στον δρομέα
 Ctrl+Shift+Space : εναλλαγή εγγραφής / μεταγραφής
 Ctrl+Shift+Q     : έξοδος
 
-Pipeline: Gemini 2.5 Pro (audio → text streaming, incremental paste).
+Pipeline: Gemini 2.5 Pro (audio → text, single call).
 """
 
 import os
@@ -89,6 +89,10 @@ HOTKEY = "ctrl+shift+space"
 HOTKEY_NOSPACE = "ctrl+alt+space"
 QUIT_KEY = "ctrl+shift+q"
 SAMPLE_RATE = 16000
+# ponytail: mic-dependent calibration knob. int16 RMS below this = treat as
+# silence and skip (avoids hallucinated paste on accidental empty triggers).
+# Raise if soft speech gets dropped, lower if room noise leaks through.
+SILENCE_RMS_THRESHOLD = 80
 MAX_RETRIES = 3
 BACKUP_DIR = Path(__file__).parent / "backups"
 
@@ -99,6 +103,8 @@ PROMPT = (
     "2. Διόρθωσε ορθογραφία, τονισμό και στίξη.\n"
     "3. Πρόσεξε ιδιαίτερα ομόηχες λέξεις (ει/οι/η/ι/υ, ο/ω, ε/αι).\n"
     "4. Διατήρησε τον προφορικό τόνο και το νόημα.\n"
+    "5. Αν κάτι δεν ακούγεται καθαρά, γράψε [δυσανάγνωστο] — ΜΗΝ μαντεύεις.\n"
+    "6. Αν δεν υπάρχει καθόλου ομιλία, επίστρεψε κενή απάντηση.\n"
     "Επίστρεψε ΜΟΝΟ το τελικό διορθωμένο κείμενο, τίποτα άλλο."
 )
 
@@ -218,17 +224,14 @@ class Dictation:
         return path
 
     def _transcribe_audio(self, audio_part):
-        """Transcribe + proofread in a single Gemini call (streaming)."""
-        chunks = []
+        """Transcribe + proofread in a single Gemini call."""
         # 2.5 Pro always thinks (thinking_budget=0 is a no-op on Pro) — let it,
         # accuracy over latency. This matches the proven greekspt config.
-        for chunk in self.client.models.generate_content_stream(
+        resp = self.client.models.generate_content(
             model=MODEL,
             contents=[PROMPT, audio_part],
-        ):
-            if chunk.text:
-                chunks.append(chunk.text)
-        return "".join(chunks).replace("\n", " ").replace("\r", "").strip()
+        )
+        return (resp.text or "").replace("\n", " ").replace("\r", "").strip()
 
     def _paste_text(self, text):
         """Paste text at cursor position, restore clipboard."""
@@ -256,6 +259,12 @@ class Dictation:
             audio = np.concatenate(self.frames)
             duration_s = len(audio) / SAMPLE_RATE
             print(f"  📏 Διάρκεια: {duration_s:.1f}s")
+
+            rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+            if rms < SILENCE_RMS_THRESHOLD:
+                print(f"  🔇 Σιωπή (RMS {rms:.0f} < {SILENCE_RMS_THRESHOLD}) — παράλειψη")
+                beep(200, 300)
+                return
 
             full_wav = self._audio_to_wav(audio)
             audio_part = types.Part.from_bytes(
